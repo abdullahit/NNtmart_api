@@ -1,8 +1,8 @@
 const mysql = require('mysql2');
 
 con = mysql.createConnection({
-    host: '13.233.95.37',
-    user : 'ubuntu',
+    host: 'localhost',
+    user : 'root',
     password : 'Csd@4850',
     database : 'nntmart'
 });
