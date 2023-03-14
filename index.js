@@ -55,9 +55,7 @@ app.post('/login', (req, res) => {
     });
 });
 
-app.listen(30001, ()={
-console.log('server Listen On Port No: 30001');
-});
+app.listen(30001);
 
 
 
