@@ -1,92 +1,209 @@
 const con = require("./config");
 const express = require('express');
-const bodyParser = require('body-parser');
+const bodyparser = require('body-parser');
 
 const app = express();
 
 
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyparser.json());
+app.use(bodyparser.urlencoded({ extended: true }));
 
 
 
-// Combined GET method for multiple queries for  Home Screen
-app.get("/data", (req, res) => {
+// (2) Combined GET method For Image Slider Table , Category Table
+// http://localhost:4000/data?q=imageslider
+// http://localhost:4000/data?q=category
+app.get("/data", (req, resp) => {
   // Get the requested query from the query parameter
   const query = req.query.q;
 
   if (!query) {
-    return res.status(400).send('At least one query is required.');
+    return resp.status(400).send('At least one query is required.');
   }
 
   // Execute the requested query using the MySQL connection
   con.query(`SELECT * FROM ${query}`, (error, result) => {
     if (error) {
-      res.send(error);
+      resp.send(error);
     } else {
-      res.send(result);
+      resp.send(result);
     }
   });
 });
 
-//For Home Screen
-// app.get('/cart-summary/:userId', (req, resp) => {
-//   const { userId } = req.params;
-//   const sql = `
-//     SELECT SUM(cart.quantity) AS totalQuantity, SUM(products.price * cart.quantity) AS totalAmount
-//     FROM cart
-//     JOIN products ON cart.product_id = products.id
-//     WHERE cart.user_id = ${userId}
-//   `;
-//   db.query(sql, (error, result) => {
-//     if (error) {
-//       resp.status(500).send('Error calculating cart summary');
-//     } else {
-//       const { totalQuantity, totalAmount } = result[0];
-//       resp.send(`Total products in cart: ${totalQuantity}, Total amount: $${totalAmount.toFixed(2)}`);
-//     }
-//   });
-// });
+// (3) For EverydayEssential 
+app.get('/everyday-essentials', (req, res) => {
+  // Get all the products from the EverydayEssential table
+  const sql = 'SELECT * FROM EverydayEssential';
+  con.query(sql, (error, result, fields) => {
+    if (error) {
+      res.status(500).send('Error retrieving everyday essentials');
+    } else {
+      // For each product in the result, fetch the corresponding details from the product and unit tables
+      const products = result.map((product) => {
+        return new Promise((resolve, reject) => {
+          const productSql = 'SELECT name, price, discount, discountType, image, unit_id FROM product WHERE id = ?';
+          con.query(productSql, [product.productId], (error, productResult, fields) => {
+            if (error) {
+              reject('Error retrieving product details');
+            } else {
+              const unitSql = 'SELECT name FROM unit WHERE id = ?';
+              con.query(unitSql, [productResult[0].unit_id], (error, unitResult, fields) => {
+                if (error) {
+                  reject('Error retrieving unit details');
+                } else {
+                  // Calculate the discounted price
+                  let discountedPrice;
+                  if (productResult[0].discountType === '%') {
+                    // Calculate the discounted price if the discount is a percentage
+                    discountedPrice = productResult[0].price - (productResult[0].price * productResult[0].discount / 100);
+                  } else {
+                    // Calculate the discount percentage if the discount is a fixed amount
+                    const discountPercentage = (productResult[0].discount / productResult[0].price) * 100;
+                    // Calculate the discounted price
+                    discountedPrice = productResult[0].price - productResult[0].discount;
+                    // Convert the discount from rupees to percentage (%)
+                    productResult[0].discount = discountPercentage.toFixed(2) + '%';
+                    // Set the discountType to percentage (%)
+                    productResult[0].discountType = '%';
+                  }
+                  // Construct the product object with all the details
+                  const productObject = {
+                    productName: productResult[0].name,
+                    productPrice: productResult[0].price,
+                    productDiscount: productResult[0].discount,
+                    productImage: productResult[0].image,
+                    productUnit: unitResult[0].name,
+                    discountType: productResult[0].discountType,
+                    discountedPrice: discountedPrice.toFixed(2)
+                  };
+                  resolve(productObject);
+                }
+              });
+            }
+          });
+        });
+      });
+      // Wait for all the promises to resolve and return the products array
+      Promise.all(products).then((products) => {
+        res.json({ totalProducts: products.length, products });
+      }).catch((error) => {
+        res.status(500).send(error);
+      });
+    }
+  });
+});
 
-app.get("/basketItem-summary/:userId",(req,res)=>{
-})
+// (4) BrandMaster (GET all brands and total number of brands)
+//http://localhost:4000/brands
+app.get('/brands', (req, res) => {
+  const getAllBrandsQuery = 'SELECT name, image FROM brandmaster';
+  const getCountQuery = 'SELECT COUNT(*) AS count FROM brandmaster';
 
+  con.query(getAllBrandsQuery, (err, results) => {
+    if (err) throw err;
 
+    con.query(getCountQuery, (err, countResults) => {
+      if (err) throw err;
 
-//For CatogeryProduct Screen
-// app.get("/category-product", (req, resp) => {
-//   //Get the categorId from the query params
-//   const categoryId = req.query.categorId;
+      const count = countResults[0].count;
+      res.json({ brands: results, count });
+    });
+  });
+});
 
-//   // fetch the products and category name from the database
-//   con.query('SELECT product.name AS product_name,product.image AS product_image, product.availableqty AS product_availableqty, product.price AS product_price, product.mrp AS product_mrp, product.discount AS product_discount, categories.name AS category_name FROM product JOIN categories ON product.category_id = categories.id WHERE categories.id = ?', [categoryId], (error, result, fields) => {
-//     if (error) throw error;
+// (6) For sendding Basket = TotalItems , TotalAmount & Totalsavings to Home Screen
+//http://localhost:4000/basket/total/:userId
+app.get('/basket/total/:userId', (req, resp) => {
+  const { userId } = req.params;
+  const sql = `SELECT COUNT(DISTINCT bi.product_id) AS totalItems,
+                        SUM(bi.itemQty * p.price) AS totalAmount,
+                        SUM(bi.itemQty * p.discount) AS totalDiscount,
+                        SUM(bi.itemQty * p.price) - SUM(bi.quantity * p.discount) as total_price_with_discount 
+                 FROM basketItem bi
+                 JOIN product p ON bi.product_id = p.id
+                 WHERE bi.user_id = ${userId}`;
+  //  confused about this discount thing
+  con.query(sql, (error, result) => {
+    if (error) {
+      resp.status(500).send('Error calculating basket total',error);
+    } else {
+      const { totalItems, totalAmount, totalDiscount } = result[0];
+      const responseObj = { totalItems, totalAmount, totalDiscount };
+      resp.send(responseObj);
+    }
+  });
+});
 
-//     // return the products as a JSON response
-//     resp.json(result);
-//   })
-// });
-
-//For CatogeryProduct Screen
-app.get("/category-product", (req, res) => {
+// (7) For CatogeryProduct Screen
+//http://localhost:4000/category-product?categoryId=<category_id> 
+//where <category_id> is the ID of the category you want to retrieve the products for.
+//example for categoryId 1:-http://localhost:4000/category-product?categoryId=1
+app.get("/category-product", (req, resp) => {
   //Get the categoryId from the query params
   const categoryId = req.query.categoryId;
 
   // fetch the products and category name from the database
-  con.query('SELECT product.name AS product_name, product.image AS product_image, product.availableqty AS product_availableqty, product.price AS product_price, product.mrp AS product_mrp, product.discount AS product_discount, category.name AS category_name FROM product JOIN category ON product.category_id = category.id WHERE category.id = ?', [categoryId], (error, result, fields) => {
+  con.query('SELECT product.name AS product_name,product.image AS product_image, product.availableqty AS product_availableqty, product.price AS product_price, product.discount AS product_discount, product.discountType AS product_discountType, categories.name AS category_name FROM product JOIN categories ON product.category_id = categories.id WHERE categories.id = ?', [categoryId], (error, result, fields) => {
     if (error) throw error;
+
+    // Calculate the discount percentage and discounted price based on the discount type
+    result.forEach((product) => {
+      if (product.product_discountType === '%') {
+        product.product_discountedPrice = product.product_price * (100 - product.product_discount) / 100;
+        product.product_discountPercentage = product.product_discount;
+      } else if (product.product_discountType === '₹') {
+        const discountPercentage = (product.product_discount / product.product_price) * 100;
+        product.product_discountedPrice = product.product_price - product.product_discount;
+        product.product_discountPercentage = discountPercentage.toFixed(2);
+      }
+    });
 
     // Extract the category name from the result
     const category_name = result.length > 0 ? result[0].category_name : null;
 
     // Return the products and category name as a JSON response
-    res.json({ products: result, category_name });
+    resp.json({ products: result, category_name });
   })
 });
 
+// (8) For MaxDiscount for Catogery 
+app.get("/maxdiscount-product ", (req, resp) => {
+  //Get the categoryId from the query params
+  const categoryId = req.query.categoryId;
 
-//For filter on category-product screen
-app.get("/filter/product", (req, res) => {
+  // fetch the products and category name from the database
+  con.query('SELECT product.name AS product_name,product.image AS product_image, product.availableqty AS product_availableqty, product.price AS product_price, product.discount AS product_discount, product.discountType AS product_discountType, categories.name AS category_name FROM product JOIN categories ON product.category_id = categories.id WHERE categories.id = ?', [categoryId], (error, result, fields) => {
+    if (error) throw error;
+
+    // Calculate the discount percentage and discounted price based on the discount type
+    result.forEach((product) => {
+      if (product.product_discountType === '%') {
+        product.product_discountedPrice = product.product_price * (100 - product.product_discount) / 100;
+        product.product_discountPercentage = product.product_discount;
+      } else if (product.product_discountType === '₹') {
+        const discountPercentage = (product.product_discount / product.product_price) * 100;
+        product.product_discountedPrice = product.product_price - product.product_discount;
+        product.product_discountPercentage = discountPercentage.toFixed(2);
+      }
+    });
+
+    // Sort the products by discount in descending order and return the top 5 products
+    const top5Products = result.sort((a, b) => b.product_discount - a.product_discount).slice(0, 5);
+
+    // Extract the category name from the result
+    const category_name = result.length > 0 ? result[0].category_name : null;
+
+    // Return the top 5 products and category name as a JSON response
+    resp.json({ products: top5Products, category_name });
+  })
+});
+
+// (9) For filter on category-product screen
+//http://localhost:4000/filter/product?minPrice=<value>&maxPrice=<value>&brand=<value>&discount=<value>
+//Replace <value> with the desired value for each query parameter.
+//For example:http://localhost:4000/filter/product?minPrice=10&maxPrice=50&brand=Nike&discount=10
+app.get("/filter/product", (req, resp) => {
   const minPrice = req.query.minPrice;
   const maxPrice = req.query.maxPrice;
   const brand = req.query.brand;
@@ -101,25 +218,40 @@ app.get("/filter/product", (req, res) => {
       console.error(error);
       res.status(500).send('Internal server error');
     } else {
-      res.json(result);
+      resp.json(result);
     }
 
   });
 
 });
 
-//For ProductDetails Screen
-app.get("/product/:productId", async (req, res) => {
+// (10) For ProductDetails Screen
+//http://localhost:4000/product/<productId>
+app.get("/product/:productId", async (req, resp) => {
   const productId = req.params.productId;
 
-  con.query("SELECT p.*, u.unitMaster FROM product p JOIN unitMaster u ON p.unitMaster_id = u.unitMaster_id WHERE p.productId = ?", [productId], (error, result, fields) => {
+  con.query("SELECT p.*, u.name AS unitName FROM product p JOIN unitMaster u ON p.unitId = u.id WHERE p.id = ?", [productId], (error, result, fields) => {
     if (error) throw error;
-    res.send(result);
+    if (result.length === 0) {
+      resp.status(404).send("Product not found");
+    } else {
+      const product = result[0];
+      const response = {
+        id: product.id,
+        name: product.productName,
+        description: product.description,
+        price: product.price,
+        unit: product.unitName
+      };
+      resp.send(response);
+    }
   });
 });
 
 
-//For RecentlyViewed  list in ProductDetails Screen
+
+// (12) For RecentlyViewed  list in ProductDetails Screen
+//http://localhost:4000/recently-viewed
 app.post('/recently-viewed', (req, res) => {
   const userId = req.body.user_id;
   const productId = req.body.product_id;
@@ -130,6 +262,7 @@ app.post('/recently-viewed', (req, res) => {
   });
 });
 
+//http://localhost:4000/recently-viewed/:userId
 app.get('/recently-viewed/:userId', (req, res) => {
   const userId = req.params.userId;
 
@@ -139,108 +272,155 @@ app.get('/recently-viewed/:userId', (req, res) => {
   });
 });
 
+// (13) For Search Suggestions
+//http://localhost:4000/search?q=<keyword> ;Replace <keyword> with the actual keyword that you want to search for.
+app.get("/search/suggestions", async (req, resp) => {
+    const keyword = req.query.q;
+  
+    con.query("SELECT id, name FROM product WHERE name LIKE ?", [`%${keyword}%`], (error, result, fields) => {
+      if (error) throw error;
+      const productNames = result.map(product => product.name);
+      resp.send(productNames);
+    });
+});
 
-
-//For Search Screen
-app.get("/search", async (req, res) => {
+// Search Screen Result
+app.get("/search/results", async (req, resp) => {
   const keyword = req.query.q;
 
-  con.query("SELECT * FROM product WHERE name LIKE ?", [`%${keyword}%`], (error, result, fields) => {
-    if (error) throw error;
-    res.send(result);
-  });
+  con.query(
+    "SELECT * FROM product WHERE name LIKE ?",
+    [`%${keyword}%`],
+    (error, result, fields) => {
+      if (error) throw error;
+
+      // Add the keyword to the response object
+      const responseObj = {
+        keyword: keyword,
+        products: result.map((product) => {
+          // Determine the discount percentage
+          let discountPercentage = product.discount;
+          if (product.discount_type === "₹") {
+            discountPercentage = ((product.discount / product.price) * 100).toFixed(2);
+          }
+
+          return {
+            name: product.name,
+            price: product.price,
+            discount: discountPercentage,
+            priceAfterDiscount: product.price - product.price * (discountPercentage / 100),
+            unit: product.unit,
+            image: product.image,
+          };
+        }),
+      };
+
+      resp.send(responseObj);
+    }
+  );
 });
 
-//For SearchResult Screen
 
-
-//For ADD-TO-Basket
-app.post('/add-to-cart/:userId', (req, res) => {
-  const { userId } = req.params;
-  const productId = req.body;
-  const itemQty = 1;
-  const sql = `INSERT INTO basketItem (user_id, product_id, itemQty) VALUES (${userId}, ${productId}, ${itemQty})`;
-  db.query(sql, (error, result) => {
-    if (error) {
-      res.status(500).send('Error adding to basketItem');
-    } else {
-      res.send('Added to basketItem');
-    }
-  });
-}); 
-
-
-//For IncreasingQty
-app.post('/increase-quantity/:userId/:productId', (req, res) => {
+// (14) For IncreasingQty
+//http://localhost:4000/increase-quantity/:userId/:productId
+app.post('/increase-quantity/:userId/:productId', (req, resp) => {
   const { userId, productId } = req.params;
-  const sql = `UPDATE basketItem SET itemQty = itemQty + 1 WHERE user_id = ${userId} AND product_id = ${productId}`;
-  db.query(sql, (error, result) => {
-    if (error) {
-      res.status(500).send('Error increasing quantity');
-    } else {
-      res.send('Quantity increased');
-    }
+  const sql = `UPDATE basketItem SET itemQty = itemQty + 1, totalPrice = (SELECT price * (itemQty + 1) FROM product WHERE id = ${productId}) WHERE user_id = ${userId} AND product_id = ${productId}`;
+  con.query(sql, (error, result) => {
+      if (error) {
+          resp.status(500).send('Error increasing quantity');
+      } else {
+          resp.send('Quantity increased');
+      }
   });
 });
 
 //For DecreasingQty
-// app.post('/decrease-quantity/:userId/:productId', (req, resp) => {
-//   const { userId, productId } = req.params;
-//   const sql = `UPDATE cart SET itemQty = itemQty - 1 WHERE user_id = ${userId} AND product_id = ${productId} AND itemQty > 1`;
-//   db.query(sql, (error, result) => {
-//     if (error) {
-//       resp.status(500).send('Error decreasing quantity');
-//     } else if (result.affectedRows === 0) {
-//       resp.status(400).send('Quantity cannot be less than 1');
-//     } else {
-//       resp.send('Quantity decreased');
-//     }
-//   });
-// });
-
-//For DecreasingQty
-app.post('/decrease-quantity/:userId/:productId', (req, res) => {
+//http://localhost:4000/decrease-quantity/:userId/:productId
+app.post('/decrease-quantity/:userId/:productId', (req, resp) => {
   const { userId, productId } = req.params;
   const sql = `SELECT itemQty FROM basketItem WHERE user_id = ${userId} AND product_id = ${productId}`;
-  db.query(sql, (error, result) => {
-    if (error) {
-      res.status(500).send('Error getting quantity');
-    } else if (result.length === 0) {
-      res.status(400).send('Product not found in basketItem');
-    } else {
-      const itemQty = result[0].itemQty;
-      if (itemQty === 1) {
-        const deleteSql = `DELETE FROM basketItem WHERE user_id = ${userId} AND product_id = ${productId}`;
-        db.query(deleteSql, (error, result) => {
-          if (error) {
-            res.status(500).send('Error removing from basketItem');
-          } else {
-            res.send('Product removed from basketItem');
-          }
-        });
+  con.query(sql, (error, result) => {
+      if (error) {
+          resp.status(500).send('Error getting quantity');
+      } else if (result.length === 0) {
+          resp.status(400).send('Product not found in basketItem');
       } else {
-        const updateSql = `UPDATE basketItem SET itemQty = itemQty - 1 WHERE user_id = ${userId} AND product_id = ${productId}`;
-        db.query(updateSql, (error, result) => {
-          if (error) {
-            res.status(500).send('Error decreasing quantity');
+          const itemQty = result[0].itemQty;
+          if (itemQty === 1) {
+              const deleteSql = `DELETE FROM basketItem WHERE user_id = ${userId} AND product_id = ${productId}`;
+              con.query(deleteSql, (error, result) => {
+                  if (error) {
+                      resp.status(500).send('Error removing from basketItem');
+                  } else {
+                      resp.send('Product removed from basketItem');
+                  }
+              });
           } else {
-            res.send('Quantity decreased');
+              const updateSql = `UPDATE basketItem SET itemQty = itemQty - 1, totalPrice = (SELECT price * (itemQty + 1) FROM product WHERE id = ${productId}) WHERE user_id = ${userId} AND product_id = ${productId}`;
+              con.query(updateSql, (error, result) => {
+                  if (error) {
+                      resp.status(500).send('Error decreasing quantity');
+                  } else {
+                      resp.send('Quantity decreased');
+                  }
+              });
           }
-        });
       }
-    }
   });
 });
 
 
 
 
-// http://localhost:4000/data?q=imageslider
-// http://localhost:4000/data?q=shopbycategory
-// http://localhost:4000/data?q=everydayessential
-// http://localhost:4000/data?q=brandspotlight
-// http://localhost:4000/data?q=subcategory
-// http://localhost:4000/data?q=basket
+
+
+
+
+
+
+app.listen(4000);
+
+
+
+
+
+//(1)  login
+
+//(2)  http://localhost:4000/data?q=imageslider
+   //  http://localhost:4000/data?q=category
+
+//(3)  http://localhost:4000/everyday-essentials
+
+//(4)  http://localhost:4000/brands
+
+//(5)  sub category
+
+//(6)  http://localhost:4000/basket/total/:userId                     -> ? 
+
+//(7)  http://localhost:4000/category-product?categoryId=<category_id>         
+
+//(8)  http://localhost:4000/maxdiscount-product?categoryId=<categoryId>
+
+
+//(9)  http://localhost:4000/filter/product?minPrice=<value>&maxPrice=<value>&brand=<value>&discount=<value>
+
+//(10) http://localhost:4000/product/<productId>                      
+
+//(11) product:- important details , other details
+
+//(12) http://localhost:4000/recently-viewed
+    // http://localhost:4000/recently-viewed/:userId
+
+//(13) Search Suggestions http://localhost:4000/search/suggestions?q=<keyword>  
+    // Search Screen http://localhost:4000/search/results?q=<keyword>  
+    // Recent SearchHistory 
+
+//(14) http://localhost:4000/basket/total/:userId
+    // basket product table 
+    // // http://localhost:4000/increase-quantity/:userId/:productId :-Increment 
+       // http://localhost:4000/decrease-quantity/:userId/:productId :-Decrement
+    // http://localhost:4000/recently-viewed/:userId
 
 
 
@@ -248,22 +428,7 @@ app.post('/decrease-quantity/:userId/:productId', (req, res) => {
 
 
 
-// app.get('/api/isLoggedIn', (req, res) => {
-//   const { MobileNumber } = req.query;
 
-//   const sql = `SELECT * FROM users WHERE MobileNumber = ? `;
-//   db.query(sql, [MobileNumber], (err, result) => {
-//     if (err) throw err;
 
-//     if (result.length > 0) {
-//       res.status(200).json({ loggedIn: true });
-//     } else {
-//       res.status(200).json({ loggedIn: false });
-//     }
-//   });
-// });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+
